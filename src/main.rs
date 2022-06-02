@@ -1,8 +1,11 @@
+mod image_ui;
+mod loader;
+
 use clap::Parser;
 use eframe::egui;
 use egui_extras::{Size, StripBuilder};
-use imview_image_loader::{spawn_loader, LoadedImage};
-use imview_image_ui::ImageUI;
+use image_ui::ImageUI;
+use loader::{spawn_loader, LoadedImage};
 use log::debug;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
