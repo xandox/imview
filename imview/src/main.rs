@@ -1,8 +1,8 @@
 use clap::Parser;
 use eframe::egui;
 use egui_extras::{Size, StripBuilder};
-use imview_image_loader::{spawn_loader, LoadedImage, RgbaImage};
-use imview_image_ui::{ColorImage, ImageUI};
+use imview_image_loader::{spawn_loader, LoadedImage};
+use imview_image_ui::ImageUI;
 use log::debug;
 use simple_logger::SimpleLogger;
 use std::path::PathBuf;
@@ -60,15 +60,6 @@ impl IMViewApp {
     }
 }
 
-fn make_color_image(image: RgbaImage) -> ColorImage {
-    let w = image.width() as _;
-    let h = image.height() as _;
-    let size = [w, h];
-    let pixels = image.as_flat_samples();
-    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
-    color_image
-}
-
 impl eframe::App for IMViewApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if let Some(ci) = self.current_image {
@@ -117,7 +108,7 @@ impl eframe::App for IMViewApp {
             if ld_img.image.is_some() {
                 self.images.push(ImageUI::new(
                     ld_img.path.clone(),
-                    make_color_image(ld_img.image.unwrap()),
+                    ld_img.image.unwrap(),
                     ctx,
                 ));
                 if self.current_image.is_none() {

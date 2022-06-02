@@ -1,13 +1,17 @@
 use arrayvec::ArrayVec as FVec;
 pub use eframe::egui::ColorImage;
 use eframe::egui::*;
+use image::imageops::crop_imm;
+use image::RgbaImage;
 use std::path::PathBuf;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum DiffMode {
     Full,
     VSplit,
+    VColorDiff,
     HSplit,
+    HColorDiff,
 }
 
 struct ImagePart {
@@ -117,6 +121,10 @@ struct ImageDiff {
     mode: DiffMode,
     v_factor: f32,
     h_factor: f32,
+    v_gamma: f32,
+    h_gamma: f32,
+    v_diff: Option<RgbaImage>,
+    h_diff: Option<RgbaImage>,
 }
 
 impl Default for ImageDiff {
@@ -125,6 +133,10 @@ impl Default for ImageDiff {
             mode: DiffMode::Full,
             v_factor: 0.5,
             h_factor: 0.5,
+            v_gamma: 2.2,
+            h_gamma: 2.2,
+            v_diff: None,
+            h_diff: None,
         }
     }
 }
@@ -132,25 +144,38 @@ impl Default for ImageDiff {
 pub struct ImageUI {
     pub filename: PathBuf,
     texture: TextureHandle,
+    color_diff_texture: Option<TextureHandle>,
+    image: RgbaImage,
     width: usize,
     height: usize,
     view_part: ImagePart,
     diff: ImageDiff,
 }
 
+fn make_color_image(image: &RgbaImage) -> ColorImage {
+    let w = image.width() as _;
+    let h = image.height() as _;
+    let size = [w, h];
+    let pixels = image.as_flat_samples();
+    let color_image = ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+    color_image
+}
+
 impl ImageUI {
     pub const ZOOM_MIN: f32 = ImagePart::ZOOM_MIN;
     pub const ZOOM_MAX: f32 = ImagePart::ZOOM_MAX;
 
-    pub fn new(filename: PathBuf, image: ColorImage, cc: &Context) -> Self {
+    pub fn new(filename: PathBuf, image: RgbaImage, cc: &Context) -> Self {
         let name = filename.display().to_string();
         let width = image.width();
         let height = image.height();
         Self {
             filename,
-            texture: cc.load_texture(name, image),
-            width: width,
-            height: height,
+            texture: cc.load_texture(name, make_color_image(&image)),
+            color_diff_texture: None,
+            image: image,
+            width: width as _,
+            height: height as _,
             view_part: ImagePart::default(),
             diff: ImageDiff::default(),
         }
@@ -158,7 +183,7 @@ impl ImageUI {
 
     pub fn uv(&self) -> FVec<Rect, 2> {
         match self.diff.mode {
-            DiffMode::Full => {
+            DiffMode::Full | DiffMode::VColorDiff | DiffMode::HColorDiff => {
                 let mut r = FVec::new();
                 r.push(self.view_part.uv_full());
                 r
@@ -166,6 +191,14 @@ impl ImageUI {
             DiffMode::VSplit => FVec::from(self.view_part.uv_vsplit(self.diff.v_factor)),
             DiffMode::HSplit => FVec::from(self.view_part.uv_hsplit(self.diff.h_factor)),
         }
+    }
+
+    fn need_half_width(&self) -> bool {
+        self.diff.mode == DiffMode::VSplit || self.diff.mode == DiffMode::VColorDiff
+    }
+
+    fn need_half_height(&self) -> bool {
+        self.diff.mode == DiffMode::HSplit || self.diff.mode == DiffMode::HColorDiff
     }
 
     pub fn view_part_rect(&self, in_rect: Rect) -> FVec<Rect, 2> {
@@ -181,7 +214,7 @@ impl ImageUI {
                 r.push(Rect::from_center_size(center, size));
                 r
             }
-            DiffMode::VSplit => {
+            DiffMode::VSplit | DiffMode::VColorDiff => {
                 let mut r = FVec::new();
                 let size = vec2(
                     in_rect.width() / 2.0 * uv.width(),
@@ -195,7 +228,7 @@ impl ImageUI {
                 r.push(Rect::from_center_size(center_r, size));
                 r
             }
-            DiffMode::HSplit => {
+            DiffMode::HSplit | DiffMode::HColorDiff => {
                 let mut r = FVec::new();
                 let size = vec2(
                     in_rect.width() * uv.width(),
@@ -213,16 +246,8 @@ impl ImageUI {
     }
 
     pub fn display_size(&mut self, in_size: Vec2) -> FVec<Vec2, 2> {
-        let width = if self.diff.mode == DiffMode::VSplit {
-            self.width as f32 / 2.0
-        } else {
-            self.width as f32
-        };
-        let height = if self.diff.mode == DiffMode::HSplit {
-            self.height as f32 / 2.0
-        } else {
-            self.height as f32
-        };
+        let width = self.width as f32 * if self.need_half_width() { 0.5 } else { 1.0 };
+        let height = self.height as f32 * if self.need_half_height() { 0.5 } else { 1.0 };
 
         let w_scale = in_size.x / width;
         let h_scale = in_size.y / height;
@@ -237,7 +262,7 @@ impl ImageUI {
         }
 
         match self.diff.mode {
-            DiffMode::Full => {
+            DiffMode::Full | DiffMode::VColorDiff | DiffMode::HColorDiff => {
                 let mut r = FVec::new();
                 r.push(vec2(w, h));
                 r
@@ -262,7 +287,7 @@ impl ImageUI {
         let slider_max = 100.0 / Self::ZOOM_MIN;
         let mut slider_val = 100.0 / self.view_part.scale.unwrap_or(1.0);
         ui.horizontal_top(|ui| {
-            ui.label("Zoom:");
+            ui.label("Zoom: ");
             if ui
                 .add(
                     widgets::Slider::new(&mut slider_val, slider_min..=slider_max)
@@ -279,19 +304,147 @@ impl ImageUI {
         .width()
     }
 
-    fn controls_ui_split(&mut self, ui: &mut Ui, width: f32) {
+    fn controls_ui_split(&mut self, ui: &mut Ui, _width: f32) {
         ui.radio_value(&mut self.diff.mode, DiffMode::Full, "Full image");
         ui.radio_value(&mut self.diff.mode, DiffMode::VSplit, "Vertical split");
-        ui.spacing_mut().slider_width = width;
-        ui.add_enabled(
-            self.diff.mode == DiffMode::VSplit,
-            widgets::Slider::new(&mut self.diff.v_factor, 0.0..=1.0).show_value(false),
-        );
+        ui.horizontal(|ui| {
+            ui.label("Part: ");
+            ui.add_enabled(
+                self.diff.mode == DiffMode::VSplit,
+                widgets::Slider::new(&mut self.diff.v_factor, 0.0..=1.0).show_value(false),
+            );
+        });
+        if ui
+            .radio_value(
+                &mut self.diff.mode,
+                DiffMode::VColorDiff,
+                "Color difference vertical",
+            )
+            .changed()
+        {
+            self.create_vertical_color_diff(ui.ctx());
+        }
+        ui.horizontal(|ui| {
+            ui.label("Gamma:");
+            if ui
+                .add_enabled(
+                    self.diff.mode == DiffMode::VColorDiff,
+                    widgets::Slider::new(&mut self.diff.v_gamma, 1.0..=5.0),
+                )
+                .changed()
+            {
+                self.create_vertical_color_diff(ui.ctx());
+            };
+        });
         ui.radio_value(&mut self.diff.mode, DiffMode::HSplit, "Horiizontal split");
-        ui.add_enabled(
-            self.diff.mode == DiffMode::HSplit,
-            widgets::Slider::new(&mut self.diff.h_factor, 0.0..=1.0).show_value(false),
+        ui.horizontal(|ui| {
+            ui.label("Part: ");
+            ui.add_enabled(
+                self.diff.mode == DiffMode::HSplit,
+                widgets::Slider::new(&mut self.diff.h_factor, 0.0..=1.0).show_value(false),
+            );
+        });
+        if ui
+            .radio_value(
+                &mut self.diff.mode,
+                DiffMode::HColorDiff,
+                "Color difference horizontal",
+            )
+            .changed()
+        {
+            self.create_horizontal_color_diff(ui.ctx());
+        }
+        ui.horizontal(|ui| {
+            ui.label("Gamma:");
+            if ui
+                .add_enabled(
+                    self.diff.mode == DiffMode::HColorDiff,
+                    widgets::Slider::new(&mut self.diff.h_gamma, 1.0..=5.0),
+                )
+                .changed()
+            {
+                self.create_horizontal_color_diff(ui.ctx());
+            }
+        });
+    }
+
+    fn create_hdiff_image(&self) -> RgbaImage {
+        let w = self.width as _;
+        let h = (self.height / 2) as _;
+        let left_img = crop_imm(&self.image, 0, 0, w, h).to_image();
+        let right_img = crop_imm(&self.image, 0, h, w, h).to_image();
+        Self::image_diff(left_img, right_img)
+    }
+
+    fn create_vdiff_image(&self) -> RgbaImage {
+        let w = (self.width / 2) as _;
+        let h = self.height as _;
+        let left_img = crop_imm(&self.image, 0, 0, w, h).to_image();
+        let right_img = crop_imm(&self.image, w, 0, w, h).to_image();
+        Self::image_diff(left_img, right_img)
+    }
+
+    fn image_diff(mut one: RgbaImage, two: RgbaImage) -> RgbaImage {
+        let (w, h) = one.dimensions();
+        for y in 0..h {
+            for x in 0..w {
+                let op = one.get_pixel_mut(x, y);
+                let tp = two.get_pixel(x, y);
+                for c in 0..3 {
+                    let diff = (op[c] as i32 - tp[c] as i32).abs() as u8;
+                    op[c] = diff;
+                }
+            }
+        }
+        one
+    }
+
+    fn image_gamma(mut img: RgbaImage, gamma: f32) -> RgbaImage {
+        let inv_gamma = 1.0 / gamma;
+        let (width, height) = img.dimensions();
+        for y in 0..height {
+            for x in 0..width {
+                let p = img.get_pixel_mut(x, y);
+                for c in 0..3 {
+                    let v = p[c] as f32;
+                    let v = (v / 255.0).powf(inv_gamma) * 255.0;
+                    let v = v as u8;
+                    p[c] = v
+                }
+            }
+        }
+        img
+    }
+
+    fn create_color_diff_texture(&mut self, cc: &Context, image: RgbaImage) {
+        let egui_image = make_color_image(&image);
+        self.color_diff_texture = Some(cc.load_texture(
+            format!("{}_color_diff", self.filename.display()),
+            egui_image,
+        ));
+    }
+
+    fn create_horizontal_color_diff(&mut self, ctx: &Context) {
+        if self.diff.h_diff.is_none() {
+            self.diff.h_diff = Some(self.create_hdiff_image())
+        }
+        let img = Self::image_gamma(
+            self.diff.h_diff.as_ref().unwrap().clone(),
+            self.diff.h_gamma,
         );
+        self.create_color_diff_texture(ctx, img);
+    }
+
+    fn create_vertical_color_diff(&mut self, ctx: &Context) {
+        if self.diff.v_diff.is_none() {
+            self.diff.v_diff = Some(self.create_vdiff_image())
+        }
+
+        let img = Self::image_gamma(
+            self.diff.v_diff.as_ref().unwrap().clone(),
+            self.diff.v_gamma,
+        );
+        self.create_color_diff_texture(ctx, img);
     }
 
     fn preview_ui(&mut self, ui: &mut Ui, width: f32) -> Response {
@@ -362,13 +515,22 @@ impl ImageUI {
         resp.interact(Sense::click())
     }
 
+    fn main_texture(&self) -> &TextureHandle {
+        match self.diff.mode {
+            DiffMode::Full | DiffMode::VSplit | DiffMode::HSplit => &self.texture,
+            DiffMode::HColorDiff | DiffMode::VColorDiff => {
+                self.color_diff_texture.as_ref().unwrap()
+            }
+        }
+    }
+
     pub fn main_ui(&mut self, ui: &mut Ui) -> Response {
         let sizes = self.display_size(ui.available_size_before_wrap());
         let uvs = self.uv();
         let resp = ui.with_layout(
             Layout::centered_and_justified(Direction::LeftToRight),
             |ui| {
-                let img = SplittedImage::new(&self.texture, sizes, uvs, self.diff.mode);
+                let img = SplittedImage::new(self.main_texture(), sizes, uvs, self.diff.mode);
                 ui.add(img);
             },
         );
@@ -441,7 +603,7 @@ impl SplittedImage {
 impl SplittedImage {
     pub fn size(&self) -> Vec2 {
         match self.mode {
-            DiffMode::Full => self.sizes[0],
+            DiffMode::Full | DiffMode::VColorDiff | DiffMode::HColorDiff => self.sizes[0],
             DiffMode::VSplit => vec2(self.sizes[0].x + self.sizes[1].x, self.sizes[0].y),
             DiffMode::HSplit => vec2(self.sizes[0].x, self.sizes[0].y + self.sizes[1].y),
         }
@@ -480,7 +642,7 @@ impl SplittedImage {
     fn build_mesh_rects(&self, rect: Rect) -> FVec<Rect, 2> {
         let mut result = FVec::new();
         match self.mode {
-            DiffMode::Full => {
+            DiffMode::Full | DiffMode::HColorDiff | DiffMode::VColorDiff => {
                 result.push(rect);
             }
             DiffMode::VSplit => {
