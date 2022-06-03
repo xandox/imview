@@ -129,12 +129,12 @@ impl FileSystem {
         };
 
         let thumbs_thread_pool = ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
+            .num_threads(num_cpus::get().min(4))
             .build()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         let image_thread_pool = ThreadPoolBuilder::new()
-            .num_threads(num_cpus::get())
+            .num_threads(num_cpus::get().min(4))
             .build()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
